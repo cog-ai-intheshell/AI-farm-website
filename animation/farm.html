@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Swarm Animation</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #191919;
+        --grid: rgba(248, 248, 248, 0.08);
+        --axis: rgba(248, 248, 248, 0.42);
+        --target: #27ae60;
+        --obstacle: #eb5757;
+        --agent: #5d71fc;
+        --agent-hot: #f89540;
+        --best: #f89540;
+        --trail: rgba(93, 113, 252, 0.18);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: var(--bg);
+      }
+
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="scene" aria-label="Swarm genetic training animation"></canvas>
+
+    <script>
+      (function() {
+        var canvas = document.getElementById("scene");
+        var ctx = canvas.getContext("2d");
+        var dpr = window.devicePixelRatio || 1;
+        var width = 0;
+        var height = 0;
+        var populationSize = 1000;
+        var lifespan = 300;
+        var maxForce = 0.5;
+        var mutationRate = 0.001;
+        var count = 0;
+        var generation = 1;
+        var rockets = [];
+        var matingPool = [];
+        var target = null;
+        var obstacles = [];
+        var fieldSpec = [{ x: 0.25, y: 0.52, w: 0.5, h: 0.026 }];
+        var heatmapPoints = [];
+        var lastBestTrajectory = [];
+
+        function css(name) {
+          return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+        }
+
+        function randomBetween(min, max) {
+          return min + Math.random() * (max - min);
+        }
+
+        function randomVector(magnitude) {
+          var angle = Math.random() * Math.PI * 2;
+          return {
+            x: Math.cos(angle) * magnitude,
+            y: Math.sin(angle) * magnitude,
+          };
+        }
+
+        function distance(a, b) {
+          return Math.hypot(a.x - b.x, a.y - b.y);
+        }
+
+        function cloneVector(vector) {
+          return { x: vector.x, y: vector.y };
+        }
+
+        function resize() {
+          dpr = window.devicePixelRatio || 1;
+          width = Math.max(1, window.innerWidth);
+          height = Math.max(1, window.innerHeight);
+          canvas.width = Math.floor(width * dpr);
+          canvas.height = Math.floor(height * dpr);
+          canvas.style.width = width + "px";
+          canvas.style.height = height + "px";
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          resetTraining();
+        }
+
+        function rebuildObstacles() {
+          obstacles = fieldSpec.map(function(spec) {
+            return {
+              x: width * spec.x,
+              y: height * spec.y,
+              w: width * spec.w,
+              h: Math.max(12, height * spec.h),
+            };
+          });
+        }
+
+        function resetTraining() {
+          count = 0;
+          generation = 1;
+          heatmapPoints = [];
+          lastBestTrajectory = [];
+          target = { x: width / 2, y: height * 0.24, r: 64 };
+          rebuildObstacles();
+          rockets = [];
+          matingPool = [];
+          for (var i = 0; i < populationSize; i++) rockets.push(new Rocket());
+        }
+
+        function drawGrid() {
+          ctx.fillStyle = css("--bg");
+          ctx.fillRect(0, 0, width, height);
+          ctx.strokeStyle = css("--grid");
+          ctx.lineWidth = 1;
+          for (var x = 0; x <= width; x += 48) {
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, height);
+            ctx.stroke();
+          }
+          for (var y = 0; y <= height; y += 48) {
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(width, y);
+            ctx.stroke();
+          }
+          ctx.strokeStyle = css("--axis");
+          ctx.beginPath();
+          ctx.moveTo(width / 2, 0);
+          ctx.lineTo(width / 2, height);
+          ctx.moveTo(0, height - 12);
+          ctx.lineTo(width, height - 12);
+          ctx.stroke();
+        }
+
+        function drawTarget() {
+          ctx.fillStyle = css("--target");
+          ctx.beginPath();
+          ctx.arc(target.x, target.y, target.r / 2, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = css("--target");
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(target.x, target.y, target.r / 2 + 8, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+
+        function roundedRect(x, y, w, h, r) {
+          var radius = Math.min(r, w / 2, h / 2);
+          ctx.beginPath();
+          ctx.moveTo(x + radius, y);
+          ctx.arcTo(x + w, y, x + w, y + h, radius);
+          ctx.arcTo(x + w, y + h, x, y + h, radius);
+          ctx.arcTo(x, y + h, x, y, radius);
+          ctx.arcTo(x, y, x + w, y, radius);
+          ctx.closePath();
+        }
+
+        function drawObstacles() {
+          ctx.fillStyle = css("--obstacle");
+          for (var i = 0; i < obstacles.length; i++) {
+            var obstacle = obstacles[i];
+            roundedRect(obstacle.x, obstacle.y, obstacle.w, obstacle.h, 8);
+            ctx.fill();
+          }
+        }
+
+        function drawHeatmap() {
+          for (var i = 0; i < heatmapPoints.length; i++) {
+            var point = heatmapPoints[i];
+            var age = i / Math.max(1, heatmapPoints.length - 1);
+            ctx.fillStyle = "rgba(235, 87, 87, " + (0.09 + age * 0.27) + ")";
+            ctx.beginPath();
+            ctx.arc(point.x, point.y, point.radius / 2, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+
+        function drawBestTrajectory() {
+          if (lastBestTrajectory.length < 2) return;
+          ctx.strokeStyle = css("--best");
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.moveTo(lastBestTrajectory[0].x, lastBestTrajectory[0].y);
+          for (var i = 2; i < lastBestTrajectory.length; i += 2) {
+            ctx.lineTo(lastBestTrajectory[i].x, lastBestTrajectory[i].y);
+          }
+          ctx.stroke();
+          var end = lastBestTrajectory[lastBestTrajectory.length - 1];
+          ctx.fillStyle = css("--best");
+          ctx.beginPath();
+          ctx.arc(end.x, end.y, 4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        function hitTarget(point) {
+          return distance(point, target) < target.r / 2;
+        }
+
+        function hitObstacle(point) {
+          for (var i = 0; i < obstacles.length; i++) {
+            var obstacle = obstacles[i];
+            if (
+              point.x > obstacle.x &&
+              point.x < obstacle.x + obstacle.w &&
+              point.y > obstacle.y &&
+              point.y < obstacle.y + obstacle.h
+            ) return true;
+          }
+          return false;
+        }
+
+        function upperFieldY() {
+          if (!obstacles.length) return height * 0.5;
+          var y = obstacles[0].y;
+          for (var i = 1; i < obstacles.length; i++) y = Math.min(y, obstacles[i].y);
+          return y;
+        }
+
+        function recordCollision(point) {
+          heatmapPoints.push({
+            x: Math.max(0, Math.min(width, point.x)),
+            y: Math.max(0, Math.min(height, point.y)),
+            radius: randomBetween(14, 34),
+          });
+          if (heatmapPoints.length > 360) heatmapPoints.splice(0, heatmapPoints.length - 360);
+        }
+
+        function DNA(genes) {
+          this.genes = genes || [];
+          if (!genes) {
+            for (var i = 0; i < lifespan; i++) this.genes[i] = randomVector(maxForce);
+          }
+        }
+
+        DNA.prototype.crossover = function(partner) {
+          var newGenes = [];
+          var mid = Math.floor(Math.random() * (this.genes.length / 2));
+          for (var i = 0; i < this.genes.length; i++) {
+            var gene = Math.random() * this.genes.length > mid ? this.genes[i] : partner.genes[i];
+            newGenes[i] = cloneVector(gene);
+          }
+          return new DNA(newGenes);
+        };
+
+        DNA.prototype.mutation = function() {
+          for (var i = 0; i < this.genes.length; i++) {
+            if (Math.random() < mutationRate) this.genes[i] = randomVector(maxForce);
+          }
+        };
+
+        function Rocket(dna) {
+          this.pos = { x: width / 2, y: height - 22 };
+          this.vel = { x: 0, y: 0 };
+          this.acc = { x: 0, y: 0 };
+          this.trail = [];
+          this.path = [cloneVector(this.pos)];
+          this.dna = dna || new DNA();
+          this.completed = false;
+          this.crashed = false;
+          this.fitness = 0;
+          this.targetDistance = Infinity;
+        }
+
+        Rocket.prototype.applyForce = function(force) {
+          this.acc.x += force.x;
+          this.acc.y += force.y;
+        };
+
+        Rocket.prototype.update = function() {
+          if (hitTarget(this.pos)) this.completed = true;
+          var boundsCrash = this.pos.x < 0 || this.pos.x > width || this.pos.y > height || this.pos.y < 0;
+          var obstacleCrash = hitObstacle(this.pos);
+          if ((boundsCrash || obstacleCrash) && !this.crashed) {
+            this.crashed = true;
+            recordCollision(this.pos);
+          }
+
+          if (!this.crashed && !this.completed) {
+            this.applyForce(this.dna.genes[count]);
+            this.vel.x += this.acc.x;
+            this.vel.y += this.acc.y;
+            var speed = Math.hypot(this.vel.x, this.vel.y);
+            if (speed > 7) {
+              this.vel.x = (this.vel.x / speed) * 7;
+              this.vel.y = (this.vel.y / speed) * 7;
+            }
+            this.pos.x += this.vel.x;
+            this.pos.y += this.vel.y;
+            this.path.push(cloneVector(this.pos));
+            this.acc.x = 0;
+            this.acc.y = 0;
+            if (count % 4 === 0) {
+              this.trail.push(cloneVector(this.pos));
+              if (this.trail.length > 34) this.trail.shift();
+            }
+          }
+        };
+
+        Rocket.prototype.draw = function() {
+          if (this.trail.length > 1) {
+            ctx.strokeStyle = css("--trail");
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(this.trail[0].x, this.trail[0].y);
+            for (var i = 1; i < this.trail.length; i++) ctx.lineTo(this.trail[i].x, this.trail[i].y);
+            ctx.stroke();
+          }
+
+          ctx.save();
+          ctx.translate(this.pos.x, this.pos.y);
+          ctx.rotate(Math.atan2(this.vel.y, this.vel.x) + Math.PI / 2);
+          ctx.fillStyle = this.completed ? css("--agent-hot") : this.crashed ? "rgba(120, 120, 120, 0.34)" : css("--agent");
+          ctx.beginPath();
+          ctx.moveTo(0, -10);
+          ctx.lineTo(-7, 10);
+          ctx.lineTo(7, 10);
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+        };
+
+        Rocket.prototype.calcFitness = function() {
+          var d = distance(this.pos, target);
+          this.targetDistance = d;
+          this.fitness = Math.max(0.01, width - d);
+          if (this.completed) this.fitness *= 100;
+          if (this.crashed) this.fitness /= 10;
+          if (this.pos.y >= height || this.pos.y < 0) this.fitness /= 2;
+          if (this.pos.y < upperFieldY()) this.fitness *= 3;
+        };
+
+        function evaluate() {
+          var maxFit = 0;
+          var bestRocket = null;
+          for (var i = 0; i < rockets.length; i++) {
+            rockets[i].calcFitness();
+            if (rockets[i].fitness > maxFit) {
+              maxFit = rockets[i].fitness;
+              bestRocket = rockets[i];
+            }
+          }
+
+          if (bestRocket) lastBestTrajectory = bestRocket.path.map(cloneVector);
+          maxFit = maxFit || 1;
+          matingPool = [];
+          for (var j = 0; j < rockets.length; j++) {
+            rockets[j].fitness /= maxFit;
+            var copies = Math.floor(rockets[j].fitness * 100);
+            for (var k = 0; k < copies; k++) matingPool.push(rockets[j]);
+          }
+          if (!matingPool.length) matingPool = rockets.slice();
+        }
+
+        function selectNextGeneration() {
+          var next = [];
+          for (var i = 0; i < rockets.length; i++) {
+            var parentA = matingPool[Math.floor(Math.random() * matingPool.length)];
+            var parentB = matingPool[Math.floor(Math.random() * matingPool.length)];
+            var child = parentA.fitness > parentB.fitness ? parentA.dna.crossover(parentB.dna) : parentB.dna.crossover(parentA.dna);
+            child.mutation();
+            next[i] = new Rocket(child);
+          }
+          rockets = next;
+        }
+
+        function allFinished() {
+          for (var i = 0; i < rockets.length; i++) {
+            if (!rockets[i].crashed && !rockets[i].completed) return false;
+          }
+          return true;
+        }
+
+        function step() {
+          drawGrid();
+          drawHeatmap();
+          drawBestTrajectory();
+          for (var i = 0; i < rockets.length; i++) {
+            rockets[i].update();
+            rockets[i].draw();
+          }
+          drawTarget();
+          drawObstacles();
+
+          count++;
+          if (count >= lifespan || allFinished()) {
+            evaluate();
+            selectNextGeneration();
+            count = 0;
+            generation++;
+          }
+          requestAnimationFrame(step);
+        }
+
+        window.addEventListener("resize", resize);
+        resize();
+        requestAnimationFrame(step);
+      })();
+    </script>
+  </body>
+</html>
