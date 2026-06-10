@@ -496,11 +496,11 @@
         const visualHeight = visual.clientHeight;
         const treeWidth = tree.offsetWidth;
         const treeHeight = tree.offsetHeight;
-        const padding = Math.max(12, Math.min(28, Math.min(visualWidth, visualHeight) * 0.08));
+        const padding = Math.max(10, Math.min(22, Math.min(visualWidth, visualHeight) * 0.045));
         fitScale = Math.min(
           (visualWidth - padding * 2) / treeWidth,
           (visualHeight - padding * 2) / treeHeight,
-          1
+          1.22
         );
         if (visualHeight < 360) fitScale = Math.min(fitScale, 0.4);
         fitScale = Math.max(0.34, fitScale);
